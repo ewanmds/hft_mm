@@ -1,0 +1,46 @@
+[2m2026-03-21T22:20:17.158710Z[0m [32m INFO[0m API server listening on http://0.0.0.0:3001
+[2m2026-03-21T22:24:38.297318Z[0m [32m INFO[0m WebSocket connecting for xyz:XYZ100...
+[2m2026-03-21T22:24:38.899095Z[0m [32m INFO[0m WebSocket connected to wss://api.hyperliquid.xyz/ws
+[2m2026-03-21T22:24:39.216121Z[0m [32m INFO[0m Market data received, starting trading loop for xyz:XYZ100
+[2m2026-03-21T22:25:43.337741Z[0m [32m INFO[0m Bot stopped: Stop requested
+[2m2026-03-21T22:25:43.339103Z[0m [32m INFO[0m Bot session ended for XYZ100
+[2m2026-03-21T22:25:55.697908Z[0m [32m INFO[0m WebSocket connecting for xyz:CL...
+[2m2026-03-21T22:25:56.312216Z[0m [32m INFO[0m WebSocket connected to wss://api.hyperliquid.xyz/ws
+[2m2026-03-21T22:25:56.638096Z[0m [32m INFO[0m Market data received, starting trading loop for xyz:CL
+[2m2026-03-21T22:35:03.921338Z[0m [32m INFO[0m Bot stopped: Stop requested
+[2m2026-03-21T22:35:03.922175Z[0m [32m INFO[0m Bot session ended for CL
+[2m2026-03-21T22:35:28.142389Z[0m [32m INFO[0m WebSocket connecting for xyz:XYZ100...
+[2m2026-03-21T22:35:28.783644Z[0m [32m INFO[0m WebSocket connected to wss://api.hyperliquid.xyz/ws
+[2m2026-03-21T22:35:29.079502Z[0m [32m INFO[0m Market data received, starting trading loop for xyz:XYZ100
+[2m2026-03-21T22:35:31.021730Z[0m [32m INFO[0m Bot stopped: Stop requested
+[2m2026-03-21T22:35:31.022815Z[0m [32m INFO[0m Bot session ended for XYZ100
+[2m2026-03-21T22:35:51.952681Z[0m [32m INFO[0m WebSocket connecting for xyz:CL...
+[2m2026-03-21T22:35:52.591128Z[0m [32m INFO[0m WebSocket connected to wss://api.hyperliquid.xyz/ws
+[2m2026-03-21T22:35:52.967403Z[0m [32m INFO[0m Market data received, starting trading loop for xyz:CL
+[2m2026-03-21T22:46:37.861854Z[0m [32m INFO[0m Bot stopped: Stop requested
+[2m2026-03-21T22:46:37.862710Z[0m [32m INFO[0m Bot session ended for CL
+[2m2026-03-21T22:47:56.407373Z[0m [32m INFO[0m WebSocket connecting for xyz:CL...
+[2m2026-03-21T22:47:57.036581Z[0m [32m INFO[0m WebSocket connected to wss://api.hyperliquid.xyz/ws
+[2m2026-03-21T22:47:57.638858Z[0m [32m INFO[0m Market data received, starting trading loop for xyz:CL
+[2m2026-03-21T22:55:24.054499Z[0m [32m INFO[0m Bot stopped: Stop requested
+[2m2026-03-21T22:55:24.055624Z[0m [32m INFO[0m Bot session ended for CL
+[2m2026-03-21T22:55:56.444642Z[0m [32m INFO[0m WebSocket connecting for xyz:BRENTOIL...
+[2m2026-03-21T22:55:57.141033Z[0m [32m INFO[0m WebSocket connected to wss://api.hyperliquid.xyz/ws
+[2m2026-03-21T22:55:57.711564Z[0m [32m INFO[0m Market data received, starting trading loop for xyz:BRENTOIL
+[2m2026-03-21T22:55:59.659894Z[0m [32m INFO[0m Bot stopped: Stop requested
+[2m2026-03-21T22:55:59.660923Z[0m [32m INFO[0m Bot session ended for BRENTOIL
+[2m2026-03-21T22:56:18.645436Z[0m [32m INFO[0m WebSocket connecting for xyz:BRENTOIL...
+[2m2026-03-21T22:56:19.242020Z[0m [32m INFO[0m WebSocket connected to wss://api.hyperliquid.xyz/ws
+[2m2026-03-21T22:56:19.549325Z[0m [32m INFO[0m Market data received, starting trading loop for xyz:BRENTOIL
+[2m2026-03-21T22:59:03.396176Z[0m [32m INFO[0m Bot stopped: Stop requested
+[2m2026-03-21T22:59:03.397251Z[0m [32m INFO[0m Bot session ended for BRENTOIL
+[2m2026-03-21T22:59:25.446983Z[0m [32m INFO[0m WebSocket connecting for xyz:CL...
+[2m2026-03-21T22:59:26.045530Z[0m [32m INFO[0m WebSocket connected to wss://api.hyperliquid.xyz/ws
+[2m2026-03-21T22:59:26.490176Z[0m [32m INFO[0m Market data received, starting trading loop for xyz:CL
+[2m2026-03-21T23:01:12.651295Z[0m [32m INFO[0m Bot stopped: Stop requested
+[2m2026-03-21T23:01:12.652090Z[0m [32m INFO[0m Bot session ended for CL
+[2m2026-03-21T23:01:37.218957Z[0m [32m INFO[0m WebSocket connecting for xyz:CL...
+[2m2026-03-21T23:01:37.931342Z[0m [32m INFO[0m WebSocket connected to wss://api.hyperliquid.xyz/ws
+[2m2026-03-21T23:01:38.236418Z[0m [32m INFO[0m Market data received, starting trading loop for xyz:CL
+[2m2026-03-21T23:47:24.850477Z[0m [32m INFO[0m Bot stopped: Stop requested
+[2m2026-03-21T23:47:24.851533Z[0m [32m INFO[0m Bot session ended for CL

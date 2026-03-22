@@ -1,0 +1,17 @@
+[Unit]
+Description=HFT Market Maker Bot (API Server)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/hft_mm
+EnvironmentFile=/home/ubuntu/hft_mm/.env
+ExecStart=/home/ubuntu/hft_mm/target/release/hft_mm --headless
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,19 @@
+import { NextRequest, NextResponse } from "next/server";
+
+const API_URL = process.env.API_URL!;
+const API_KEY = process.env.API_KEY!;
+
+export async function POST(req: NextRequest) {
+  const body = await req.json();
+  const res = await fetch(`${API_URL}/api/start`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  const data = await res.json();
+  return NextResponse.json(data, { status: res.status });
+}

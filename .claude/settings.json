@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx create-next-app@latest frontend --typescript --tailwind --app --no-src-dir --eslint --no-git --import-alias \"@/*\")",
+      "Bash(npx --yes create-next-app@latest frontend --typescript --tailwind --app --no-src-dir --eslint --no-git --import-alias \"@/*\" --no-react-compiler)",
+      "Bash(npm install:*)",
+      "Bash(npm audit:*)",
+      "Bash(curl -s http://localhost:3001/api/health)",
+      "Bash(curl -s http://localhost:3000 -o /dev/null -w \"%{http_code}\")",
+      "Bash(curl -s http://localhost:3000/setup -o /dev/null -w \"%{http_code}\")",
+      "Bash(curl -s http://localhost:3000/api/tokens -o /dev/null -w \" tokens:%{http_code}\")",
+      "Bash(curl -s \"http://localhost:3000/api/status\" -o /dev/null -w \" status:%{http_code}\")",
+      "Bash(netstat -ano)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
+      "Bash($env:HEADLESS=\"1\")",
+      "Bash($env:API_KEY=\"localdev\")",
+      "Bash(.targetreleasehft_mm.exe)",
+      "Bash(npm run:*)",
+      "Bash(curl -s -H \"Authorization: Bearer localdev\" http://localhost:3001/api/health)",
+      "Bash(tasklist /FI 'PID eq 11292' /FI 'PID eq 14280' /FI 'PID eq 3188')",
+      "Bash(tasklist)",
+      "Bash(kill -9 11292)",
+      "Bash(taskkill //F //PID 11292)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/setup)",
+      "Bash(taskkill //F //PID 3188)",
+      "Bash(curl -s -o /dev/null -w \"frontend:%{http_code}\" http://localhost:3000)",
+      "Bash(ls c:/Users/ewanm/Desktop/hft_mm/frontend/.env*)",
+      "Bash(ls c:/Users/ewanm/Desktop/hft_mm/.env*)"
+    ]
+  }
+}
