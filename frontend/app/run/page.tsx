@@ -50,7 +50,7 @@ export default function RunPage() {
   };
 
   const isRunning = status?.running === true;
-  const cpm = status ? costPerMillion(status.stats) : 0;
+  const cpm = status?.stats ? costPerMillion(status.stats) : 0;
 
   return (
     <div style={{ maxWidth: 960, margin: "0 auto" }}>
