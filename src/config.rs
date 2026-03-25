@@ -292,7 +292,7 @@ pub fn default_config(token: TokenConfig) -> Config {
             hedge_loss_pct: 0.05,          // close position if unrealized loss > 5% of notional — balanced vs taker cost ($86/M)
         },
         spread: SpreadConfig {
-            min_spread_ticks: 0.0,       // CRITICAL: wider than 3-tick market = guaranteed maker
+            min_spread_ticks: 2.0,       // floor: always at least 2-tick half-spread (= base_spread_ticks)
             base_spread_ticks: 2.0,      // 2-tick half-spread
             max_spread_ticks: 14.0,      // wide ceiling for vol spikes
             skew_factor: 20.0,           // brutal inventory skew — dump positions fast
@@ -340,21 +340,22 @@ pub fn default_config(token: TokenConfig) -> Config {
             side_size_floor: 1.0,
         },
         momentum: MomentumConfig {
-            enabled: true,
-            lookback: 20,          // look at last 20 WS price samples (~a few seconds)
-            min_move_ticks: 8.0,   // pause if price moves >8 ticks directionally — more sensitive
-            pause_sec: 30.0,       // stay out 30s after trend detected — longer pause
+            enabled: false,        // disabled: pausing during moves loses queue; A-S σ² widens spread naturally
+            lookback: 20,
+            min_move_ticks: 8.0,
+            pause_sec: 30.0,
         },
         as_model: AsModelConfig {
-            // γ: calibrate so γ·σ²·T matches your target spread in USD.
-            // For US500 (tick=$0.01, σ_price≈$0.3/tick, T=30s):
-            //   δ_half = γ · (0.09) · 30 / 2 → want ~$0.05 → γ ≈ 0.037
-            // For BTC (σ_price≈$8/tick, T=30s):
-            //   δ_half = γ · 64 · 30 / 2 → want ~$1.0 → γ ≈ 0.001
-            // Default γ=0.05 is a reasonable starting point; clamp does the rest.
-            gamma: 0.04, // calibrated for XYZ100 with wider base spread
-            kappa: 0.07, // calibrated to actual XYZ100 fill rate (~0.05-0.07 fills/s)
-            t_secs: 1800.0,      // 30-minute T-window; T-t counts down then resets
+            // XYZ100 calibration (tick=$1, price ~24000):
+            // Target half-spread ≈ 3-4 ticks.
+            // δ_half = (γ·σ²·T)/2 + (1/γ)·ln(1+γ/κ)
+            // With γ=0.001, κ=1.5, T=600, σ²≈9 (3-tick std):
+            //   term1 = 0.001·9·600/2 = 2.7t
+            //   term2 = 1000·ln(1.000667) ≈ 0.67t  →  total ≈ 3.4t  ✓
+            // Old γ=0.04/κ=0.07 gave term2 ≈ 11t → clamped to max=14t → zero fills.
+            gamma: 0.001, // XYZ100: small γ keeps term2 < 1t
+            kappa: 1.5,   // realistic fill rate for a liquid index (~1-2/s)
+            t_secs: 600.0,       // 10-minute session; shorter T keeps term1 bounded
             sigma_window: 64,
             max_loss_usd: 5.0,
             flatten_threshold_usd: 20.0, // flatten if |notional| > $20 at session reset
