@@ -32,6 +32,14 @@ pub struct RiskConfig {
     pub cost_m_min_vol: f64,
     /// Close position via market order if unrealized loss exceeds this fraction of notional (e.g. 0.04 = 4%)
     pub hedge_loss_pct: f64,
+    /// Hard position cap: stop posting inventory-building orders if |pos * mid| > this (USD notional)
+    pub position_cap_usd: f64,
+    /// Seconds after a fill to sample markout (how far price moved against fill)
+    pub markout_sample_sec: f64,
+    /// Adverse markout threshold in ticks: fills where price moved > this against us count as adverse
+    pub markout_threshold_ticks: f64,
+    /// Exponential decay half-life for markout score (seconds)
+    pub markout_halflife_sec: f64,
 }
 
 /// Spread & grid parameters
@@ -290,6 +298,10 @@ pub fn default_config(token: TokenConfig) -> Config {
             cost_m_kill: 35.0,           // kill at $15/1M — no tolerance for bleeding
             cost_m_min_vol: 60000.0,       // start monitoring immediately
             hedge_loss_pct: 0.05,          // close position if unrealized loss > 5% of notional — balanced vs taker cost ($86/M)
+            position_cap_usd: 600.0,       // hard cap: stop building if |pos * mid| > $600 (2x order_size_usd)
+            markout_sample_sec: 2.0,       // sample markout 2s after fill
+            markout_threshold_ticks: 3.0,  // adverse if price moved > 3 ticks against fill
+            markout_halflife_sec: 180.0,   // score decays with 3-min half-life
         },
         spread: SpreadConfig {
             min_spread_ticks: 2.0,       // floor: always at least 2-tick half-spread (= base_spread_ticks)

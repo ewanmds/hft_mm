@@ -35,6 +35,15 @@ pub struct PendingRt {
     pub time: f64,
 }
 
+/// Fill record for adverse markout tracking
+#[derive(Debug, Clone)]
+pub struct FillRecord {
+    pub side: Side,
+    pub fill_price: f64,
+    pub time: f64,
+    pub checked: bool, // whether markout has been sampled yet
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum Side {
     Buy,
@@ -250,6 +259,10 @@ pub struct MmState {
     pub consecutive_sell_fills: u32,
     pub adverse_fill_count: u32,  // fills where price moved against us after fill
 
+    // Adverse markout tracking
+    pub fill_history: VecDeque<FillRecord>, // recent fills for markout sampling
+    pub markout_score: f64,                 // 0.0–1.0: fraction of recent fills that were adverse
+
     // Timing
     pub last_quote_ts: f64,
     pub last_api_sync_ts: f64,
@@ -318,6 +331,8 @@ impl MmState {
             consecutive_buy_fills: 0,
             consecutive_sell_fills: 0,
             adverse_fill_count: 0,
+            fill_history: VecDeque::with_capacity(50),
+            markout_score: 0.0,
             last_quote_ts: 0.0,
             last_api_sync_ts: 0.0,
             last_sync_time: 0.0,

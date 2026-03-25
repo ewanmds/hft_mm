@@ -197,6 +197,18 @@ pub fn apply_position_limits(
     let mid = state.bbo.map(|b| b.mid).unwrap_or(0.0);
     let position = state.position;
 
+    // Hard position cap: if |pos * mid| > cap, only quote on the reducing side
+    if config.risk.position_cap_usd > 0.0 && mid > 0.0 {
+        let inv_notional = position.abs() * mid;
+        if inv_notional > config.risk.position_cap_usd {
+            if position > 0.0 {
+                bids.clear(); // too long — no more buys
+            } else if position < 0.0 {
+                asks.clear(); // too short — no more sells
+            }
+        }
+    }
+
     if now < state.fill_lock_until {
         if let Some(side) = state.fill_lock_side {
             match side {

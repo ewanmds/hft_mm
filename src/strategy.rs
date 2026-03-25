@@ -82,8 +82,10 @@ pub fn calculate_levels(
         config.as_model.kappa,
     );
 
-    // Clamp to configured tick bounds (guard-rails, not a model change)
-    let delta = delta_raw
+    // Widen spread when recent fills have been adversely marked out
+    // markout_score 0→no change, 0.5→1.5x wider, 1.0→3x wider
+    let markout_mult = 1.0 + state.markout_score * 2.0;
+    let delta = (delta_raw * markout_mult)
         .max(config.spread.min_spread_ticks * tick)
         .min(config.spread.max_spread_ticks * tick);
 

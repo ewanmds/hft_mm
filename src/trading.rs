@@ -192,6 +192,17 @@ pub fn process_ws_event(config: &Config, state: &Arc<RwLock<MmState>>, evt: WsEv
                 s.pending_rts.retain(|p| (now - p.time) < 300.0);
             }
 
+            // Record fill for adverse markout tracking
+            s.fill_history.push_back(crate::types::FillRecord {
+                side: fill_side,
+                fill_price: price,
+                time: now,
+                checked: false,
+            });
+            while s.fill_history.len() > 50 {
+                s.fill_history.pop_front();
+            }
+
             s.last_fill_time_rt = now;
             s.waiting_for_rt = !rt_matched;
             s.fill_lock_side = Some(fill_side);
@@ -233,6 +244,59 @@ pub fn process_ws_event(config: &Config, state: &Arc<RwLock<MmState>>, evt: WsEv
     }
 }
 
+/// Sample fill history for adverse markouts and update markout_score.
+/// Called every iteration. Score is exponentially weighted fraction of adverse fills.
+fn update_markout_score(state: &mut crate::types::MmState, now: f64, config: &Config) {
+    let mid = match state.bbo {
+        Some(b) => b.mid,
+        None => return,
+    };
+    let tick = config.token.tick_size;
+    let threshold = config.risk.markout_threshold_ticks * tick;
+    let sample_delay = config.risk.markout_sample_sec;
+    let halflife = config.risk.markout_halflife_sec;
+
+    // Mark fills that are old enough to sample
+    for fill in state.fill_history.iter_mut() {
+        if fill.checked || (now - fill.time) < sample_delay {
+            continue;
+        }
+        fill.checked = true;
+        // Adverse = price moved against the fill after we got filled
+        let adverse = match fill.side {
+            crate::types::Side::Buy => mid < fill.fill_price - threshold,  // bought, price fell
+            crate::types::Side::Sell => mid > fill.fill_price + threshold, // sold, price rose
+        };
+        if adverse {
+            state.adverse_fill_count += 1;
+        }
+    }
+
+    // Recompute score: exponentially weighted adverse ratio over fill_history
+    let mut weighted_adverse = 0.0_f64;
+    let mut weight_total = 0.0_f64;
+    for fill in state.fill_history.iter() {
+        if !fill.checked {
+            continue;
+        }
+        let age = (now - fill.time).max(0.0);
+        let w = (-age * std::f64::consts::LN_2 / halflife).exp();
+        let adverse = match fill.side {
+            crate::types::Side::Buy => mid < fill.fill_price - threshold,
+            crate::types::Side::Sell => mid > fill.fill_price + threshold,
+        };
+        if adverse {
+            weighted_adverse += w;
+        }
+        weight_total += w;
+    }
+    state.markout_score = if weight_total > 0.0 {
+        (weighted_adverse / weight_total).min(1.0)
+    } else {
+        0.0
+    };
+}
+
 /// Core trading iteration
 pub async fn run_iteration(
     config: &Config,
@@ -243,6 +307,12 @@ pub async fn run_iteration(
 
     let now = now_secs();
     let now_ms = (now * 1000.0) as u64;
+
+    // ── Adverse markout score update ───────────────────────────────────────
+    {
+        let mut s = state.write();
+        update_markout_score(&mut s, now, config);
+    }
 
     // ── Avellaneda-Stoikov: T-window reset ────────────────────────────────
     {
