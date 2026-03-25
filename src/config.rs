@@ -289,14 +289,14 @@ pub fn default_config(token: TokenConfig) -> Config {
             min_fills_kill: 30,           // detect bad session very early
             cost_m_kill: 35.0,           // kill at $15/1M — no tolerance for bleeding
             cost_m_min_vol: 60000.0,       // start monitoring immediately
-            hedge_loss_pct: 0.04,          // close position if unrealized loss > 4% of notional
+            hedge_loss_pct: 0.06,          // close position if unrealized loss > 6% of notional — reduce hedge frequency
         },
         spread: SpreadConfig {
             min_spread_ticks: 0.0,       // CRITICAL: wider than 3-tick market = guaranteed maker
-            base_spread_ticks: 2.0,      // $0.06 half-spread → $0.12 full = good edge per RT
+            base_spread_ticks: 3.0,      // 3-tick half-spread — covers fees + adverse selection buffer
             max_spread_ticks: 14.0,      // wide ceiling for vol spikes
             skew_factor: 20.0,           // brutal inventory skew — dump positions fast
-            level_tick_spacing: 1,       // 3-tick gap between levels — diversify fills
+            level_tick_spacing: 2,       // 2-tick gap between levels — less correlated fills
         },
         timing: TimingConfig {
             refresh_fast_us: 60,         // slower loop — less crossing risk
@@ -342,8 +342,8 @@ pub fn default_config(token: TokenConfig) -> Config {
         momentum: MomentumConfig {
             enabled: true,
             lookback: 20,          // look at last 20 WS price samples (~a few seconds)
-            min_move_ticks: 10.0,  // pause if price moves >10 ticks directionally
-            pause_sec: 20.0,       // stay out 20s after trend detected
+            min_move_ticks: 8.0,   // pause if price moves >8 ticks directionally — more sensitive
+            pause_sec: 30.0,       // stay out 30s after trend detected — longer pause
         },
         as_model: AsModelConfig {
             // γ: calibrate so γ·σ²·T matches your target spread in USD.
@@ -352,8 +352,8 @@ pub fn default_config(token: TokenConfig) -> Config {
             // For BTC (σ_price≈$8/tick, T=30s):
             //   δ_half = γ · 64 · 30 / 2 → want ~$1.0 → γ ≈ 0.001
             // Default γ=0.05 is a reasonable starting point; clamp does the rest.
-            gamma: 0.05, // était 0.05
-            kappa: 2.0,  // était 2.0         // ~2 fills/second typical for perps
+            gamma: 0.04, // calibrated for XYZ100 with wider base spread
+            kappa: 0.07, // calibrated to actual XYZ100 fill rate (~0.05-0.07 fills/s)
             t_secs: 1800.0,      // 30-minute T-window; T-t counts down then resets
             sigma_window: 64,
             max_loss_usd: 5.0,
