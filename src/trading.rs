@@ -299,61 +299,8 @@ pub async fn run_iteration(
         }
     }
 
-    // ── Momentum filter: pause quoting during strong directional moves ────────
-    if config.momentum.enabled {
-        let (still_paused, should_detect) = {
-            let s = state.read();
-            let still_paused = now < s.momentum_pause_until;
-            let can_detect = s.price_history.len() >= config.momentum.lookback;
-            (still_paused, can_detect)
-        };
-
-        if still_paused {
-            let mut s = state.write();
-            let remaining = s.momentum_pause_until - now;
-            s.last_status = format!("TREND PAUSE {:.0}s", remaining);
-            return;
-        }
-
-        if should_detect {
-            let (is_trending, net_ticks) = {
-                let s = state.read();
-                let n = s.price_history.len();
-                let lookback = config.momentum.lookback.min(n);
-                let current = s.price_history[n - 1];
-                let past = s.price_history[n - lookback];
-                let net_ticks = (current - past).abs() / config.token.tick_size;
-                (net_ticks >= config.momentum.min_move_ticks, net_ticks)
-            };
-
-            if is_trending {
-                // Cancel all open orders and pause
-                let cancel_oids: Vec<(String, u64)> = {
-                    let mut s = state.write();
-                    let oids: Vec<(String, u64)> = s.buy_oids.iter().chain(s.sell_oids.iter())
-                        .map(|&oid| (config.token.symbol.clone(), oid)).collect();
-                    s.buy_oids.clear();
-                    s.sell_oids.clear();
-                    s.order_details.clear();
-                    s.cancel_pending_since = None;
-                    s.momentum_pause_until = now + config.momentum.pause_sec;
-                    s.anchor_price = None; // force requote after pause
-                    s.push_event(EventLevel::Warn, "TREND", format!(
-                        "Momentum detected: {:.1}t move, pausing {:.0}s",
-                        net_ticks, config.momentum.pause_sec
-                    ));
-                    s.last_status = format!("TREND PAUSE {:.0}s ({:.1}t)", config.momentum.pause_sec, net_ticks);
-                    oids
-                };
-                if !cancel_oids.is_empty() {
-                    let _ = exchange.bulk_cancel(&cancel_oids).await;
-                }
-                return;
-            }
-        }
-    }
-
     // ── Hedge: close position via IOC market order if unrealized loss > hedge_loss_pct ─
+    // NOTE: runs BEFORE momentum filter so position protection is always active
     if config.risk.hedge_loss_pct > 0.0 {
         let (should_hedge, position, mid, unrealized_pnl) = {
             let s = state.read();
@@ -366,7 +313,6 @@ pub async fn run_iteration(
             (should, s.position, mid, s.unrealized_pnl)
         };
         if should_hedge {
-            // Cancel all open orders first
             let cancel_oids: Vec<(String, u64)> = {
                 let mut s = state.write();
                 let oids: Vec<(String, u64)> = s.buy_oids.iter().chain(s.sell_oids.iter())
@@ -380,7 +326,6 @@ pub async fn run_iteration(
             if !cancel_oids.is_empty() {
                 let _ = exchange.bulk_cancel(&cancel_oids).await;
             }
-            // Send IOC reduce-only market order to close position
             let is_buy = position < 0.0;
             let hedge_size = position.abs();
             let req = crate::exchange::OrderRequest {
@@ -398,6 +343,88 @@ pub async fn run_iteration(
                 if is_buy { "BUY" } else { "SELL" }, hedge_size, mid, unrealized_pnl
             ));
             s.last_status = format!("HEDGE {} {:.4} @ ${:.2}", if is_buy { "BUY" } else { "SELL" }, hedge_size, mid);
+        }
+    }
+
+    // ── Momentum filter: pause quoting during strong directional moves ────────
+    if config.momentum.enabled {
+        let (still_paused, should_detect, position, mid) = {
+            let s = state.read();
+            let still_paused = now < s.momentum_pause_until;
+            let can_detect = s.price_history.len() >= config.momentum.lookback;
+            let mid = s.bbo.map(|b| b.mid).unwrap_or(0.0);
+            (still_paused, can_detect, s.position, mid)
+        };
+
+        if still_paused {
+            let mut s = state.write();
+            let remaining = s.momentum_pause_until - now;
+            s.last_status = format!("TREND PAUSE {:.0}s", remaining);
+            return;
+        }
+
+        if should_detect {
+            let (is_trending, net_ticks, trend_direction) = {
+                let s = state.read();
+                let n = s.price_history.len();
+                let lookback = config.momentum.lookback.min(n);
+                let current = s.price_history[n - 1];
+                let past = s.price_history[n - lookback];
+                let delta = current - past;
+                let net_ticks = delta.abs() / config.token.tick_size;
+                (net_ticks >= config.momentum.min_move_ticks, net_ticks, delta)
+            };
+
+            if is_trending {
+                // Cancel all open orders
+                let cancel_oids: Vec<(String, u64)> = {
+                    let mut s = state.write();
+                    let oids: Vec<(String, u64)> = s.buy_oids.iter().chain(s.sell_oids.iter())
+                        .map(|&oid| (config.token.symbol.clone(), oid)).collect();
+                    s.buy_oids.clear();
+                    s.sell_oids.clear();
+                    s.order_details.clear();
+                    s.cancel_pending_since = None;
+                    s.momentum_pause_until = now + config.momentum.pause_sec;
+                    s.anchor_price = None;
+                    s.push_event(EventLevel::Warn, "TREND", format!(
+                        "{} {:.1}t move — pausing {:.0}s",
+                        if trend_direction < 0.0 { "DOWN" } else { "UP" },
+                        net_ticks, config.momentum.pause_sec
+                    ));
+                    s.last_status = format!("TREND PAUSE {:.0}s ({:.1}t)", config.momentum.pause_sec, net_ticks);
+                    oids
+                };
+                if !cancel_oids.is_empty() {
+                    let _ = exchange.bulk_cancel(&cancel_oids).await;
+                }
+
+                // If we have inventory going against the trend, close it via IOC market order
+                // e.g. long position during a dump → sell IOC to cut losses immediately
+                let inventory_against_trend =
+                    (trend_direction < 0.0 && position > 0.0) ||
+                    (trend_direction > 0.0 && position < 0.0);
+
+                if inventory_against_trend && mid > 0.0 {
+                    let is_buy = position < 0.0;
+                    let close_size = position.abs();
+                    let req = crate::exchange::OrderRequest {
+                        coin: config.token.symbol.clone(),
+                        is_buy,
+                        sz: close_size,
+                        limit_px: if is_buy { mid * 1.01 } else { mid * 0.99 },
+                        reduce_only: true,
+                        tif: "Ioc".to_string(),
+                    };
+                    let _ = exchange.bulk_orders(&[req]).await;
+                    let mut s = state.write();
+                    s.push_event(EventLevel::Warn, "TREND CLOSE", format!(
+                        "Closing {} {:.4} against trend @ ${:.2}",
+                        if is_buy { "SHORT" } else { "LONG" }, close_size, mid
+                    ));
+                }
+                return;
+            }
         }
     }
 
