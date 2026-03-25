@@ -30,6 +30,8 @@ pub struct RiskConfig {
     pub min_fills_kill: u64,
     pub cost_m_kill: f64,
     pub cost_m_min_vol: f64,
+    /// Close position via market order if unrealized loss exceeds this fraction of notional (e.g. 0.04 = 4%)
+    pub hedge_loss_pct: f64,
 }
 
 /// Spread & grid parameters
@@ -95,6 +97,18 @@ pub struct SignalConfig {
     pub side_size_floor: f64,
 }
 
+/// Momentum filter — pauses quoting during strong directional moves
+#[derive(Debug, Clone)]
+pub struct MomentumConfig {
+    pub enabled: bool,
+    /// Number of recent price samples to look at
+    pub lookback: usize,
+    /// Directional move threshold in ticks to trigger a pause
+    pub min_move_ticks: f64,
+    /// How long to stay out of the market after a trend is detected (seconds)
+    pub pause_sec: f64,
+}
+
 /// Pure Avellaneda-Stoikov model parameters
 #[derive(Debug, Clone)]
 pub struct AsModelConfig {
@@ -129,6 +143,7 @@ pub struct Config {
     pub rt_adapt: RtAdaptConfig,
     pub signals: SignalConfig,
     pub as_model: AsModelConfig,
+    pub momentum: MomentumConfig,
 }
 
 impl Config {
@@ -274,6 +289,7 @@ pub fn default_config(token: TokenConfig) -> Config {
             min_fills_kill: 30,           // detect bad session very early
             cost_m_kill: 35.0,           // kill at $15/1M — no tolerance for bleeding
             cost_m_min_vol: 60000.0,       // start monitoring immediately
+            hedge_loss_pct: 0.04,          // close position if unrealized loss > 4% of notional
         },
         spread: SpreadConfig {
             min_spread_ticks: 0.0,       // CRITICAL: wider than 3-tick market = guaranteed maker
@@ -287,9 +303,9 @@ pub fn default_config(token: TokenConfig) -> Config {
             refresh_normal_us: 120,
             refresh_slow_us: 250,
             api_sync_sec: 3.0,
-            drift_ticks: 5,              // HIGH: let orders rest 5 ticks before requoting
-            urgent_drift_ticks: 9,       // only urgent at 9 ticks — very patient
-            periodic_sync_sec: 20.0,     // very patient periodic refresh
+            drift_ticks: 8,              // let orders rest 8 ticks before requoting
+            urgent_drift_ticks: 15,      // only urgent at 15 ticks — very patient
+            periodic_sync_sec: 30.0,     // very patient periodic refresh
             rt_wait_sec: 3.5,            // give 3.5s for RT completion
             max_quote_ttl: 30.0,         // let orders sit 30s — maximize queue priority
             feed_stale_sec: 8.0,
@@ -322,6 +338,12 @@ pub fn default_config(token: TokenConfig) -> Config {
             max_fair_skew_ticks: 0.0,
             side_size_skew: 0.0,
             side_size_floor: 1.0,
+        },
+        momentum: MomentumConfig {
+            enabled: true,
+            lookback: 20,          // look at last 20 WS price samples (~a few seconds)
+            min_move_ticks: 10.0,  // pause if price moves >10 ticks directionally
+            pause_sec: 20.0,       // stay out 20s after trend detected
         },
         as_model: AsModelConfig {
             // γ: calibrate so γ·σ²·T matches your target spread in USD.

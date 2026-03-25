@@ -260,6 +260,7 @@ pub struct MmState {
     // Margin
     pub size_scale: f64,
     pub margin_pause_until: f64,
+    pub momentum_pause_until: f64,
 
     // Spread
     pub current_spread_ticks: i32,
@@ -324,6 +325,7 @@ impl MmState {
             last_ws_msg_ts: 0.0,
             size_scale: 1.0,
             margin_pause_until: 0.0,
+            momentum_pause_until: 0.0,
             current_spread_ticks: 30,
             stats: Stats::new(),
             processed_fill_ids: HashSet::new(),
