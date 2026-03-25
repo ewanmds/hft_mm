@@ -289,7 +289,7 @@ pub fn default_config(token: TokenConfig) -> Config {
             min_fills_kill: 30,           // detect bad session very early
             cost_m_kill: 35.0,           // kill at $15/1M — no tolerance for bleeding
             cost_m_min_vol: 60000.0,       // start monitoring immediately
-            hedge_loss_pct: 0.06,          // close position if unrealized loss > 6% of notional — reduce hedge frequency
+            hedge_loss_pct: 0.05,          // close position if unrealized loss > 5% of notional — balanced vs taker cost ($86/M)
         },
         spread: SpreadConfig {
             min_spread_ticks: 0.0,       // CRITICAL: wider than 3-tick market = guaranteed maker
