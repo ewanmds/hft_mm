@@ -293,7 +293,7 @@ pub fn default_config(token: TokenConfig) -> Config {
         },
         spread: SpreadConfig {
             min_spread_ticks: 0.0,       // CRITICAL: wider than 3-tick market = guaranteed maker
-            base_spread_ticks: 3.0,      // 3-tick half-spread — covers fees + adverse selection buffer
+            base_spread_ticks: 2.0,      // 2-tick half-spread
             max_spread_ticks: 14.0,      // wide ceiling for vol spikes
             skew_factor: 20.0,           // brutal inventory skew — dump positions fast
             level_tick_spacing: 2,       // 2-tick gap between levels — less correlated fills
