@@ -120,6 +120,10 @@ pub fn calculate_levels(
         if sz < config.token.min_size {
             continue;
         }
+        // Hyperliquid rejects orders below $10 notional
+        if sz * mid < 10.0 {
+            continue;
+        }
 
         // Bid and ask are symmetric around the reservation price r (not mid)
         let p_bid = round_to_decimals(
