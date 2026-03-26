@@ -48,11 +48,13 @@ pub fn check_risks(config: &Config, state: &MmState, now: f64) -> RiskAction {
         return RiskAction::ExitPosition { sell };
     }
 
-    // 5. Toxic flow: 5+ consecutive same-side fills with inventory building = exit
-    if state.consecutive_buy_fills >= 5 && state.position > 0.0 && state.unrealized_pnl < 0.0 {
+    // 5. Toxic flow: 3+ consecutive same-side fills building inventory = exit immediately.
+    // Do NOT wait for unrealized_pnl < 0: in a trending market the bot fills into
+    // a rising (or falling) price and PNL is briefly positive — the loss hits on reversal.
+    if state.consecutive_buy_fills >= 3 && state.position > 0.0 {
         return RiskAction::ExitPosition { sell: true };
     }
-    if state.consecutive_sell_fills >= 5 && state.position < 0.0 && state.unrealized_pnl < 0.0 {
+    if state.consecutive_sell_fills >= 3 && state.position < 0.0 {
         return RiskAction::ExitPosition { sell: false };
     }
 

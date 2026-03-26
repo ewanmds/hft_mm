@@ -307,7 +307,7 @@ pub fn default_config(token: TokenConfig) -> Config {
             min_spread_ticks: 3.0,       // floor at 3t: breakeven vs fees is ~1t, 3t gives margin
             base_spread_ticks: 3.0,
             max_spread_ticks: 14.0,      // wide ceiling for vol spikes
-            skew_factor: 8.0,            // inventory skew: long 0.01u → r shifts -0.08t, helps close positions faster (improves RT ratio)
+            skew_factor: 300.0,          // inventory skew: long 0.01u → r shifts -3t, makes bot eager to sell (at 8 the shift was 0.08t — negligible)
             level_tick_spacing: 2,       // 2-tick gap between levels — less correlated fills
         },
         timing: TimingConfig {
