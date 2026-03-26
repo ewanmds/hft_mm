@@ -73,7 +73,7 @@ pub fn calculate_levels(
         .max(1e-18);
     let t_remaining = state.t_remaining_secs.max(1.0);
 
-    let (r, delta_raw) = as_quotes(
+    let (r_raw, delta_raw) = as_quotes(
         mid,
         position,
         sigma2,
@@ -81,6 +81,12 @@ pub fn calculate_levels(
         config.as_model.gamma,
         config.as_model.kappa,
     );
+
+    // Explicit inventory skew on top of A-S reservation price.
+    // A-S skew alone (q·γ·σ²·T) is ~0.03t for typical XYZ100 positions — negligible.
+    // skew_factor adds: if long 0.01 units, shift r down by 0.01 * skew_factor * tick.
+    // This makes bids lower and asks lower → bot is eager to sell → improves RT ratio.
+    let r = r_raw - position * config.spread.skew_factor * tick;
 
     // Widen spread when recent fills have been adversely marked out
     // markout_score 0→no change, 0.5→1.5x wider, 1.0→3x wider

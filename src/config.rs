@@ -298,16 +298,16 @@ pub fn default_config(token: TokenConfig) -> Config {
             cost_m_kill: 35.0,           // kill at $15/1M — no tolerance for bleeding
             cost_m_min_vol: 60000.0,       // start monitoring immediately
             hedge_loss_pct: 0.05,          // close position if unrealized loss > 5% of notional — balanced vs taker cost ($86/M)
-            position_cap_usd: 600.0,       // hard cap: stop building if |pos * mid| > $600 (2x order_size_usd)
+            position_cap_usd: 300.0,       // hard cap: stop building if |pos * mid| > $300 (1x order_size_usd) — sessions show RT=0 losses from one-sided buildup
             markout_sample_sec: 2.0,       // sample markout 2s after fill
             markout_threshold_ticks: 3.0,  // adverse if price moved > 3 ticks against fill
             markout_halflife_sec: 180.0,   // score decays with 3-min half-life
         },
         spread: SpreadConfig {
-            min_spread_ticks: 2.0,       // floor: always at least 2-tick half-spread (= base_spread_ticks)
-            base_spread_ticks: 2.0,      // 2-tick half-spread
+            min_spread_ticks: 3.0,       // floor at 3t: breakeven vs fees is ~1t, 3t gives margin
+            base_spread_ticks: 3.0,
             max_spread_ticks: 14.0,      // wide ceiling for vol spikes
-            skew_factor: 20.0,           // brutal inventory skew — dump positions fast
+            skew_factor: 8.0,            // inventory skew: long 0.01u → r shifts -0.08t, helps close positions faster (improves RT ratio)
             level_tick_spacing: 2,       // 2-tick gap between levels — less correlated fills
         },
         timing: TimingConfig {
