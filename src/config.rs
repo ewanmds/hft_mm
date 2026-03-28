@@ -228,8 +228,8 @@ pub fn available_tokens() -> HashMap<&'static str, TokenConfig> {
     });
     m.insert("XYZ100", TokenConfig {
         symbol: "xyz:XYZ100".to_string(), tick_size: 1.0, min_size: 0.0001,
-        order_size_usd: 300.0, target_leverage: 30.0,
-        num_levels: 2, level_multipliers: vec![1.0, 0.25],
+        order_size_usd: 80.0, target_leverage: 30.0,
+        num_levels: 2, level_multipliers: vec![1.0, 0.5],
     });
     m.insert("CL", TokenConfig {
         symbol: "xyz:CL".to_string(), tick_size: 0.01, min_size: 0.01,

@@ -48,15 +48,9 @@ pub fn check_risks(config: &Config, state: &MmState, now: f64) -> RiskAction {
         return RiskAction::ExitPosition { sell };
     }
 
-    // 5. Toxic flow: 3+ consecutive same-side fills building inventory = exit immediately.
-    // Do NOT wait for unrealized_pnl < 0: in a trending market the bot fills into
-    // a rising (or falling) price and PNL is briefly positive — the loss hits on reversal.
-    if state.consecutive_buy_fills >= 3 && state.position > 0.0 {
-        return RiskAction::ExitPosition { sell: true };
-    }
-    if state.consecutive_sell_fills >= 3 && state.position < 0.0 {
-        return RiskAction::ExitPosition { sell: false };
-    }
+    // 5. Toxic flow: handled via soft block in apply_position_limits (consecutive >= 2 →
+    // stop posting the building side). No market exit here — taker fees are too expensive.
+    // The stop_loss above is the backstop for extreme adverse moves.
 
     RiskAction::Continue
 }
@@ -209,6 +203,16 @@ pub fn apply_position_limits(
                 asks.clear(); // too short — no more sells
             }
         }
+    }
+
+    // Soft toxic flow block: 2+ consecutive same-side fills building inventory →
+    // stop posting the building side and let the skew attract opposite fills.
+    // This avoids taker fees from market exits while preventing further accumulation.
+    if state.consecutive_buy_fills >= 2 && position > 0.0 {
+        bids.clear();
+    }
+    if state.consecutive_sell_fills >= 2 && position < 0.0 {
+        asks.clear();
     }
 
     if now < state.fill_lock_until {

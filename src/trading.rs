@@ -189,7 +189,7 @@ pub fn process_ws_event(config: &Config, state: &Arc<RwLock<MmState>>, evt: WsEv
 
             if !rt_matched {
                 s.pending_rts.push(PendingRt { side: fill_side, price, size, time: now });
-                s.pending_rts.retain(|p| (now - p.time) < 300.0);
+                s.pending_rts.retain(|p| (now - p.time) < 60.0);
             }
 
             // Record fill for adverse markout tracking
