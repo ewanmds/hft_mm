@@ -157,7 +157,7 @@ struct PerpDexEntry {
     name: String,
 }
 
-// ── Bulk order/cancel request ──────────────────────────────────────
+// ── Bulk order/cancel/modify request ──────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OrderRequest {
@@ -167,6 +167,16 @@ pub struct OrderRequest {
     pub limit_px: f64,
     pub reduce_only: bool,
     pub tif: String, // "Alo", "Ioc", "Gtc"
+}
+
+/// A single order modification request
+#[derive(Debug, Clone)]
+pub struct ModifyRequest {
+    pub oid: u64,
+    pub new_price: f64,
+    pub new_size: f64,
+    pub is_buy: bool,
+    pub reduce_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -217,11 +227,23 @@ struct BulkCancelAction {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct SignedModifyRequest {
+    oid: u64,
+    order: SignedOrderRequest,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BulkModifyAction {
+    modifies: Vec<SignedModifyRequest>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "camelCase")]
 enum ExchangeAction {
     Order(BulkOrderAction),
     Cancel(BulkCancelAction),
+    BatchModify(BulkModifyAction),
 }
 
 impl HyperLiquidExchange {
@@ -547,6 +569,32 @@ impl HyperLiquidExchange {
 
         let action = ExchangeAction::Cancel(BulkCancelAction {
             cancels: cancel_specs,
+        });
+
+        self.exchange_request(&action, nonce).await
+    }
+
+    /// Modify existing orders in bulk (preserves queue priority for size-only changes)
+    pub async fn bulk_modify(&self, mods: &[ModifyRequest]) -> Result<Value> {
+        let nonce = Self::timestamp_ms();
+
+        let modify_specs: Vec<SignedModifyRequest> = mods
+            .iter()
+            .map(|m| SignedModifyRequest {
+                oid: m.oid,
+                order: SignedOrderRequest {
+                    asset: self.asset_index,
+                    is_buy: m.is_buy,
+                    limit_px: float_to_wire(m.new_price),
+                    sz: float_to_wire(m.new_size),
+                    reduce_only: m.reduce_only,
+                    order_type: SignedOrderType::Limit(LimitOrderType { tif: "Alo".to_string() }),
+                },
+            })
+            .collect();
+
+        let action = ExchangeAction::BatchModify(BulkModifyAction {
+            modifies: modify_specs,
         });
 
         self.exchange_request(&action, nonce).await

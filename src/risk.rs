@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::types::{MmState, OrderLevel, Side};
+use crate::types::{MmState, Side};
 
 /// Risk check result
 #[derive(Debug)]
@@ -68,7 +68,6 @@ pub enum RefreshReason {
     SpreadChange { from: i32, to: i32 },
     QuoteTtl(f64),
     Periodic,
-    RtWait(f64),
 }
 
 /// Evaluate whether orders need refreshing
@@ -83,7 +82,6 @@ pub fn should_refresh(
     let has_asks = !state.sell_oids.is_empty();
     let has_both = has_bids && has_asks;
     let has_any = has_bids || has_asks;
-    let fill_lock_active = now < state.fill_lock_until;
 
     let bbo = match state.bbo {
         Some(b) => b,
@@ -100,32 +98,8 @@ pub fn should_refresh(
         return RefreshReason::Initial;
     }
 
-    if fill_lock_active {
-        if let Some(side) = state.fill_lock_side {
-            let locked_orders_live = match side {
-                Side::Buy => has_bids,
-                Side::Sell => has_asks,
-            };
-            if locked_orders_live {
-                return RefreshReason::SameSideLock(side);
-            }
-        }
-    }
-
-    // RT wait cooldown
-    let time_since_fill = if state.last_fill_time_rt > 0.0 {
-        now - state.last_fill_time_rt
-    } else {
-        999.0
-    };
-    let in_rt_wait = time_since_fill < config.timing.rt_wait_sec && state.waiting_for_rt;
-
-    if in_rt_wait && has_both {
-        return RefreshReason::RtWait(config.timing.rt_wait_sec - time_since_fill);
-    }
-
     // Missing one side
-    if has_any && !has_both && !in_rt_wait {
+    if has_any && !has_both {
         return RefreshReason::Replenish;
     }
 
@@ -140,20 +114,18 @@ pub fn should_refresh(
         return RefreshReason::UrgentDrift(drift_ticks);
     }
 
-    if drift_ticks >= config.timing.drift_ticks && !in_rt_wait {
+    if drift_ticks >= config.timing.drift_ticks {
         return RefreshReason::NormalDrift(drift_ticks);
     }
 
     // Spread change
     if let Some(anchor_spread) = state.anchor_spread_ticks {
-        if !in_rt_wait {
-            let cur_spread = ((bbo.best_ask - bbo.best_bid) / tick) as i32;
-            if (cur_spread - anchor_spread).abs() >= 3 {
-                return RefreshReason::SpreadChange {
-                    from: anchor_spread,
-                    to: cur_spread,
-                };
-            }
+        let cur_spread = ((bbo.best_ask - bbo.best_bid) / tick) as i32;
+        if (cur_spread - anchor_spread).abs() >= 3 {
+            return RefreshReason::SpreadChange {
+                from: anchor_spread,
+                to: cur_spread,
+            };
         }
     }
 
@@ -164,13 +136,25 @@ pub fn should_refresh(
         999.0
     };
 
-    if quote_age >= config.timing.max_quote_ttl && !in_rt_wait {
+    if quote_age >= config.timing.max_quote_ttl {
         return RefreshReason::QuoteTtl(quote_age);
     }
 
     // Periodic sync
-    if (now - state.last_sync_time) > config.timing.periodic_sync_sec && !in_rt_wait {
+    if (now - state.last_sync_time) > config.timing.periodic_sync_sec {
         return RefreshReason::Periodic;
+    }
+
+    if now < state.fill_lock_until {
+        if let Some(side) = state.fill_lock_side {
+            let locked_orders_live = match side {
+                Side::Buy => has_bids,
+                Side::Sell => has_asks,
+            };
+            if locked_orders_live {
+                return RefreshReason::SameSideLock(side);
+            }
+        }
     }
 
     // Stable
@@ -205,14 +189,57 @@ pub fn apply_position_limits(
         }
     }
 
-    // Soft toxic flow block: 2+ consecutive same-side fills building inventory →
-    // stop posting the building side and let the skew attract opposite fills.
-    // This avoids taker fees from market exits while preventing further accumulation.
-    if state.consecutive_buy_fills >= 2 && position > 0.0 {
-        bids.clear();
-    }
-    if state.consecutive_sell_fills >= 2 && position < 0.0 {
-        asks.clear();
+    // Graduated toxic flow response:
+    // combine recent same-side flow imbalance with markout score and only restrict
+    // the side that would build more inventory.
+    let recent_count = state.recent_fill_sides.len().min(10);
+    if recent_count > 0 {
+        let recent_buys = state
+            .recent_fill_sides
+            .iter()
+            .rev()
+            .take(recent_count)
+            .filter(|(side, _)| *side == Side::Buy)
+            .count();
+        let buy_ratio = recent_buys as f64 / recent_count as f64;
+        let flow_imbalance = ((buy_ratio - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+        let combined_toxic = (state.markout_score * 0.5 + flow_imbalance * 0.5).clamp(0.0, 1.0);
+
+        let (size_scale, widen_ticks) = if combined_toxic > 0.8 {
+            (0.0, 0u32)
+        } else if combined_toxic >= 0.6 {
+            (0.25, 2u32)
+        } else if combined_toxic >= 0.4 {
+            (0.5, 1u32)
+        } else {
+            (1.0, 0u32)
+        };
+
+        if position > 0.0 {
+            if size_scale == 0.0 {
+                bids.clear();
+            } else if size_scale < 1.0 || widen_ticks > 0 {
+                for level in bids.iter_mut() {
+                    level.size = floor_to_decimals(level.size * size_scale, config.size_decimals());
+                    if widen_ticks > 0 {
+                        level.price = (level.price - widen_ticks as f64 * config.token.tick_size).max(config.token.tick_size);
+                    }
+                }
+                bids.retain(|level| level.size >= config.token.min_size);
+            }
+        } else if position < 0.0 {
+            if size_scale == 0.0 {
+                asks.clear();
+            } else if size_scale < 1.0 || widen_ticks > 0 {
+                for level in asks.iter_mut() {
+                    level.size = floor_to_decimals(level.size * size_scale, config.size_decimals());
+                    if widen_ticks > 0 {
+                        level.price += widen_ticks as f64 * config.token.tick_size;
+                    }
+                }
+                asks.retain(|level| level.size >= config.token.min_size);
+            }
+        }
     }
 
     if now < state.fill_lock_until {

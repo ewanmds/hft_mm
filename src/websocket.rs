@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
-use crate::types::{Bbo, PendingRt, Side};
+use crate::types::Bbo;
 
 /// Events pushed from WebSocket to the main loop
 #[derive(Debug)]
@@ -18,6 +18,8 @@ pub enum WsEvent {
         best_bid: f64,
         best_ask: f64,
         mid: f64,
+        bid_depth_5: f64,
+        ask_depth_5: f64,
     },
     /// Fill received
     Fill {
@@ -64,6 +66,16 @@ fn now_secs() -> f64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs_f64()
+}
+
+fn parse_level_size(level: &Value) -> Option<f64> {
+    level
+        .get("sz")
+        .and_then(|v| {
+            v.as_str()
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| v.as_f64())
+        })
 }
 
 /// Launch WebSocket connection and return event channel
@@ -233,6 +245,8 @@ fn process_l2(
         None => return,
     };
     let mid = (best_bid + best_ask) * 0.5;
+    let bid_depth_5 = bids.iter().take(5).filter_map(parse_level_size).sum::<f64>();
+    let ask_depth_5 = asks.iter().take(5).filter_map(parse_level_size).sum::<f64>();
 
     // Update shared state (lock-free write via parking_lot)
     {
@@ -242,7 +256,13 @@ fn process_l2(
         s.ready = true;
     }
 
-    let _ = event_tx.send(WsEvent::L2Update { best_bid, best_ask, mid });
+    let _ = event_tx.send(WsEvent::L2Update {
+        best_bid,
+        best_ask,
+        mid,
+        bid_depth_5,
+        ask_depth_5,
+    });
 }
 
 #[inline]

@@ -24,6 +24,10 @@ pub struct TrackedOrder {
     pub size: f64,
     pub is_buy: bool,
     pub ts: f64,
+    /// Desired price (for modify-in-place diffing)
+    pub target_price: f64,
+    /// Distance from current best quote in ticks
+    pub drift_ticks: u32,
 }
 
 /// Pending round-trip leg
@@ -35,19 +39,35 @@ pub struct PendingRt {
     pub time: f64,
 }
 
-/// Fill record for adverse markout tracking
+/// Fill record for adverse markout tracking (multi-horizon)
 #[derive(Debug, Clone)]
 pub struct FillRecord {
     pub side: Side,
     pub fill_price: f64,
     pub time: f64,
-    pub checked: bool, // whether markout has been sampled yet
+    pub checked: bool,           // whether 2s markout has been sampled
+    pub checked_1s: bool,        // 1s markout sampled
+    pub checked_5s: bool,        // 5s markout sampled
+    pub checked_10s: bool,       // 10s markout sampled
+    pub markout_1s: Option<f64>, // price change at 1s (negative = adverse for buy)
+    pub markout_5s: Option<f64>,
+    pub markout_10s: Option<f64>,
+    pub order_ts: f64,           // when the order was placed (for queue time)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum Side {
     Buy,
     Sell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolRegime {
+    Low,
+    Normal,
+    High,
+    Extreme,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -89,6 +109,18 @@ pub struct Stats {
     pub orders_posted: u64,
     pub cancel_batches: u64,
     pub cancel_requests: u64,
+    // Instrumentation (Phase 0)
+    pub queue_time_sum: f64,         // sum of (fill_ts - order_placed_ts)
+    pub queue_time_count: u64,
+    pub cancel_repost_count: u64,    // full cancel-then-repost cycles
+    pub spread_capture_sum: f64,     // sum of (fill_price - mid) * side_sign (>0 = good)
+    pub spread_capture_count: u64,
+    pub markout_1s_sum: f64,
+    pub markout_1s_count: u64,
+    pub markout_5s_sum: f64,
+    pub markout_5s_count: u64,
+    pub markout_10s_sum: f64,
+    pub markout_10s_count: u64,
 }
 
 impl Stats {
@@ -107,6 +139,17 @@ impl Stats {
             orders_posted: 0,
             cancel_batches: 0,
             cancel_requests: 0,
+            queue_time_sum: 0.0,
+            queue_time_count: 0,
+            cancel_repost_count: 0,
+            spread_capture_sum: 0.0,
+            spread_capture_count: 0,
+            markout_1s_sum: 0.0,
+            markout_1s_count: 0,
+            markout_5s_sum: 0.0,
+            markout_5s_count: 0,
+            markout_10s_sum: 0.0,
+            markout_10s_count: 0,
         }
     }
 
@@ -150,6 +193,32 @@ impl Stats {
         } else {
             0.0
         }
+    }
+
+    pub fn avg_queue_time(&self) -> f64 {
+        if self.queue_time_count > 0 {
+            self.queue_time_sum / self.queue_time_count as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn avg_spread_capture(&self) -> f64 {
+        if self.spread_capture_count > 0 {
+            self.spread_capture_sum / self.spread_capture_count as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub fn avg_markout_1s(&self) -> f64 {
+        if self.markout_1s_count > 0 { self.markout_1s_sum / self.markout_1s_count as f64 } else { 0.0 }
+    }
+    pub fn avg_markout_5s(&self) -> f64 {
+        if self.markout_5s_count > 0 { self.markout_5s_sum / self.markout_5s_count as f64 } else { 0.0 }
+    }
+    pub fn avg_markout_10s(&self) -> f64 {
+        if self.markout_10s_count > 0 { self.markout_10s_sum / self.markout_10s_count as f64 } else { 0.0 }
     }
 }
 
@@ -250,6 +319,7 @@ pub struct MmState {
 
     // Round-trip
     pub pending_rts: Vec<PendingRt>,
+    pub recent_rt_pnls: VecDeque<f64>,
     pub last_fill_time_rt: f64,
     pub waiting_for_rt: bool,
     pub rt_spread_adj: i32,
@@ -263,6 +333,20 @@ pub struct MmState {
     pub fill_history: VecDeque<FillRecord>, // recent fills for markout sampling
     pub markout_score: f64,                 // 0.0–1.0: fraction of recent fills that were adverse
 
+    // Toxic flow: recent fill sides for graduated scoring (Phase 6)
+    pub recent_fill_sides: VecDeque<(Side, f64)>, // (side, timestamp) last 20 fills
+
+    // EWMA variance for time-consistent vol estimation (Phase 4)
+    pub ewma_variance: f64,
+    pub last_variance_update_ts: f64,
+    pub last_mid_for_variance: f64,
+    pub long_term_variance: f64,  // slow EMA for regime detection (halflife 10min)
+    pub vol_regime: VolRegime,
+
+    // Book imbalance (Phase 5)
+    pub book_imbalance: f64,      // (bid_depth - ask_depth) / (bid_depth + ask_depth)
+    pub book_imbalance_ema: f64,  // smoothed, halflife ~10s
+
     // Timing
     pub last_quote_ts: f64,
     pub last_api_sync_ts: f64,
@@ -274,6 +358,7 @@ pub struct MmState {
     pub size_scale: f64,
     pub margin_pause_until: f64,
     pub momentum_pause_until: f64,
+    pub last_margin_reject_ts: f64,
 
     // Spread
     pub current_spread_ticks: i32,
@@ -325,6 +410,7 @@ impl MmState {
             volatility: 0.0,
             signals: SignalState::neutral(),
             pending_rts: Vec::new(),
+            recent_rt_pnls: VecDeque::with_capacity(10),
             last_fill_time_rt: 0.0,
             waiting_for_rt: false,
             rt_spread_adj: 0,
@@ -333,6 +419,14 @@ impl MmState {
             adverse_fill_count: 0,
             fill_history: VecDeque::with_capacity(50),
             markout_score: 0.0,
+            recent_fill_sides: VecDeque::with_capacity(20),
+            ewma_variance: 0.0,
+            last_variance_update_ts: 0.0,
+            last_mid_for_variance: 0.0,
+            long_term_variance: 0.0,
+            vol_regime: VolRegime::Normal,
+            book_imbalance: 0.0,
+            book_imbalance_ema: 0.0,
             last_quote_ts: 0.0,
             last_api_sync_ts: 0.0,
             last_sync_time: 0.0,
@@ -341,6 +435,7 @@ impl MmState {
             size_scale: 1.0,
             margin_pause_until: 0.0,
             momentum_pause_until: 0.0,
+            last_margin_reject_ts: 0.0,
             current_spread_ticks: 30,
             stats: Stats::new(),
             processed_fill_ids: HashSet::new(),

@@ -33,6 +33,12 @@ pub struct FinishedSession {
     pub fills: u64,
     pub rt_count: u64,
     pub cost_per_million: f64,
+    pub avg_queue_time: f64,
+    pub avg_spread_capture: f64,
+    pub cancel_repost_count: u64,
+    pub markout_1s_avg: f64,
+    pub markout_5s_avg: f64,
+    pub markout_10s_avg: f64,
     pub stop_reason: String,
 }
 
@@ -176,6 +182,12 @@ impl BotManager {
                     fills: stats.fills_count,
                     rt_count: stats.rt_count,
                     cost_per_million: stats.cost_per_million(),
+                    avg_queue_time: stats.avg_queue_time(),
+                    avg_spread_capture: stats.avg_spread_capture(),
+                    cancel_repost_count: stats.cancel_repost_count,
+                    markout_1s_avg: stats.avg_markout_1s(),
+                    markout_5s_avg: stats.avg_markout_5s(),
+                    markout_10s_avg: stats.avg_markout_10s(),
                     stop_reason,
                 }
             };
@@ -249,7 +261,7 @@ async fn run_headless(
     let mut got_bbo = false;
     while !got_bbo && wait_start.elapsed() < Duration::from_secs(15) {
         if let Ok(evt) = event_rx.try_recv() {
-            if let WsEvent::L2Update { best_bid, best_ask, mid } = evt {
+            if let WsEvent::L2Update { best_bid, best_ask, mid, .. } = evt {
                 let mut s = state.write();
                 s.bbo = Some(Bbo { best_bid, best_ask, mid });
                 s.last_ws_msg_ts = now_secs();

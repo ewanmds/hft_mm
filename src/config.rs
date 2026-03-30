@@ -48,7 +48,7 @@ pub struct SpreadConfig {
     pub min_spread_ticks: f64,
     pub base_spread_ticks: f64,
     pub max_spread_ticks: f64,
-    pub skew_factor: f64,
+    pub imbalance_weight: f64,
     pub level_tick_spacing: u32,
 }
 
@@ -62,7 +62,6 @@ pub struct TimingConfig {
     pub drift_ticks: u32,
     pub urgent_drift_ticks: u32,
     pub periodic_sync_sec: f64,
-    pub rt_wait_sec: f64,
     pub max_quote_ttl: f64,
     pub feed_stale_sec: f64,
     pub vol_window: usize,
@@ -131,6 +130,8 @@ pub struct AsModelConfig {
     pub t_secs: f64,
     /// Rolling window for σ² (price-change variance) estimate.
     pub sigma_window: usize,
+    /// Inventory normalization scale in USD. One "risk unit" corresponds to this notional.
+    pub risk_unit_usd: f64,
     /// Session stop-loss: kill session if PnL drops below -max_loss_usd.
     pub max_loss_usd: f64,
     /// Flatten inventory via market order at session reset if |notional| > this.
@@ -284,6 +285,7 @@ pub fn default_config(token: TokenConfig) -> Config {
         .unwrap_or_else(|_| String::new())
         .trim()
         .to_lowercase();
+    let risk_unit_usd = token.order_size_usd;
 
     Config {
         agent_private_key: std::env::var("HL_AGENT_KEY")
@@ -307,7 +309,7 @@ pub fn default_config(token: TokenConfig) -> Config {
             min_spread_ticks: 3.0,       // floor at 3t: breakeven vs fees is ~1t, 3t gives margin
             base_spread_ticks: 3.0,
             max_spread_ticks: 14.0,      // wide ceiling for vol spikes
-            skew_factor: 300.0,          // inventory skew: long 0.01u → r shifts -3t, makes bot eager to sell (at 8 the shift was 0.08t — negligible)
+            imbalance_weight: 0.5,       // book imbalance contributes up to ~0.5t fair-value skew
             level_tick_spacing: 2,       // 2-tick gap between levels — less correlated fills
         },
         timing: TimingConfig {
@@ -315,18 +317,17 @@ pub fn default_config(token: TokenConfig) -> Config {
             refresh_normal_us: 120,
             refresh_slow_us: 250,
             api_sync_sec: 3.0,
-            drift_ticks: 8,              // let orders rest 8 ticks before requoting
-            urgent_drift_ticks: 15,      // only urgent at 15 ticks — very patient
-            periodic_sync_sec: 30.0,     // very patient periodic refresh
-            rt_wait_sec: 3.5,            // give 3.5s for RT completion
-            max_quote_ttl: 30.0,         // let orders sit 30s — maximize queue priority
+            drift_ticks: 4,              // tighter tracking now that modify avoids naked periods
+            urgent_drift_ticks: 8,
+            periodic_sync_sec: 90.0,
+            max_quote_ttl: 120.0,
             feed_stale_sec: 8.0,
             vol_window: 64,
         },
         margin: MarginConfig {
             reject_cooldown: 6.0,
             reject_decay: 0.85,
-            recovery_step: 0.015,        // very slow size recovery
+            recovery_step: 0.05,         // faster recovery after margin rejects
             min_size_scale: 0.20,
             close_cooldown: 3.0,
         },
@@ -365,10 +366,11 @@ pub fn default_config(token: TokenConfig) -> Config {
             //   term1 = 0.001·9·600/2 = 2.7t
             //   term2 = 1000·ln(1.000667) ≈ 0.67t  →  total ≈ 3.4t  ✓
             // Old γ=0.04/κ=0.07 gave term2 ≈ 11t → clamped to max=14t → zero fills.
-            gamma: 0.001, // XYZ100: small γ keeps term2 < 1t
+            gamma: 0.0015,
             kappa: 1.5,   // realistic fill rate for a liquid index (~1-2/s)
-            t_secs: 600.0,       // 10-minute session; shorter T keeps term1 bounded
+            t_secs: 300.0,
             sigma_window: 64,
+            risk_unit_usd,
             max_loss_usd: 5.0,
             flatten_threshold_usd: 20.0, // flatten if |notional| > $20 at session reset
         },

@@ -1,10 +1,9 @@
 /// Shared trading logic used by both terminal (main.rs) and headless (bot.rs) modes.
 
-use anyhow::Result;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::exchange::{HyperLiquidExchange, OrderRequest};
@@ -21,7 +20,8 @@ pub fn now_secs() -> f64 {
 }
 
 pub fn fill_lock_secs(config: &Config) -> f64 {
-    config.timing.rt_wait_sec.clamp(0.25, 1.0)
+    let _ = config;
+    0.25
 }
 
 pub fn extract_order_details(
@@ -52,6 +52,8 @@ pub fn extract_order_details(
                     size: req.sz,
                     is_buy: req.is_buy,
                     ts: now,
+                    target_price: req.limit_px,
+                    drift_ticks: 0,
                 },
             );
         }
@@ -132,13 +134,59 @@ pub async fn wait_for_cancel_ack(
     }
 }
 
+fn normalized_inventory(position: f64, mid: f64, risk_unit_usd: f64) -> f64 {
+    if mid <= 0.0 || risk_unit_usd <= 0.0 {
+        return position;
+    }
+    let unit_size = (risk_unit_usd / mid).max(1e-9);
+    position / unit_size
+}
+
+fn managed_sides(
+    refresh: &RefreshReason,
+    bbo: Bbo,
+    anchor_price: Option<f64>,
+    has_bids: bool,
+    has_asks: bool,
+) -> (bool, bool) {
+    match refresh {
+        RefreshReason::NoRefresh => (false, false),
+        RefreshReason::Initial => (true, true),
+        RefreshReason::StopExit { sell } => (!*sell, *sell),
+        RefreshReason::Replenish => (!has_bids, !has_asks),
+        RefreshReason::SameSideLock(side) => match side {
+            Side::Buy => (false, true),
+            Side::Sell => (true, false),
+        },
+        RefreshReason::UrgentDrift(_) | RefreshReason::NormalDrift(_) => {
+            if let Some(anchor) = anchor_price {
+                if bbo.mid >= anchor {
+                    (true, false)
+                } else {
+                    (false, true)
+                }
+            } else {
+                (true, true)
+            }
+        }
+        RefreshReason::SpreadChange { .. } | RefreshReason::QuoteTtl(_) | RefreshReason::Periodic => {
+            (true, true)
+        }
+    }
+}
+
 /// Process a single WebSocket event into MmState
 pub fn process_ws_event(config: &Config, state: &Arc<RwLock<MmState>>, evt: WsEvent) {
     let mut s = state.write();
     let now = now_secs();
 
     match evt {
-        WsEvent::L2Update { best_bid, best_ask, mid } => {
+        WsEvent::L2Update { best_bid, best_ask, mid, bid_depth_5, ask_depth_5 } => {
+            let dt = if s.last_variance_update_ts > 0.0 {
+                (now - s.last_variance_update_ts).max(0.0)
+            } else {
+                0.0
+            };
             s.bbo = Some(Bbo { best_bid, best_ask, mid });
             s.last_ws_msg_ts = now;
             s.price_history.push_back(mid);
@@ -146,12 +194,79 @@ pub fn process_ws_event(config: &Config, state: &Arc<RwLock<MmState>>, evt: WsEv
                 s.price_history.pop_front();
             }
             s.volatility = update_volatility(&s.price_history);
+
+            if dt > 0.01 && s.last_mid_for_variance > 0.0 {
+                let change = mid - s.last_mid_for_variance;
+                let instant_var = (change * change) / dt.max(1e-6);
+                let alpha = (1.0 - (-dt * std::f64::consts::LN_2 / 60.0).exp()).clamp(0.001, 0.5);
+                let long_alpha = (1.0 - (-dt * std::f64::consts::LN_2 / 600.0).exp()).clamp(0.0005, 0.1);
+                s.ewma_variance = if s.ewma_variance > 0.0 {
+                    s.ewma_variance * (1.0 - alpha) + instant_var * alpha
+                } else {
+                    instant_var
+                };
+                s.long_term_variance = if s.long_term_variance > 0.0 {
+                    s.long_term_variance * (1.0 - long_alpha) + instant_var * long_alpha
+                } else {
+                    instant_var
+                };
+            }
+            s.last_variance_update_ts = now;
+            s.last_mid_for_variance = mid;
+
+            let total_depth = bid_depth_5 + ask_depth_5;
+            s.book_imbalance = if total_depth > 0.0 {
+                ((bid_depth_5 - ask_depth_5) / total_depth).clamp(-1.0, 1.0)
+            } else {
+                0.0
+            };
+            if dt > 0.0 {
+                let imb_alpha = (1.0 - (-dt * std::f64::consts::LN_2 / 10.0).exp()).clamp(0.01, 0.5);
+                s.book_imbalance_ema =
+                    s.book_imbalance_ema * (1.0 - imb_alpha) + s.book_imbalance * imb_alpha;
+            } else {
+                s.book_imbalance_ema = s.book_imbalance;
+            }
+
+            let variance_ratio = if s.long_term_variance > 0.0 {
+                s.ewma_variance / s.long_term_variance.max(1e-18)
+            } else {
+                1.0
+            };
+            s.vol_regime = if variance_ratio < 0.5 {
+                crate::types::VolRegime::Low
+            } else if variance_ratio < 2.0 {
+                crate::types::VolRegime::Normal
+            } else if variance_ratio < 5.0 {
+                crate::types::VolRegime::High
+            } else {
+                crate::types::VolRegime::Extreme
+            };
+
             // Update T-t for Avellaneda-Stoikov
             let elapsed = now - (s.as_t0_ms as f64 / 1000.0);
             s.t_remaining_secs = (config.as_model.t_secs - elapsed).max(1.0);
             // Update A-S display values
-            let sigma2 = compute_price_variance(&s.price_history, config.as_model.sigma_window).max(1e-18);
-            let (r, d) = as_quotes(mid, s.position, sigma2, s.t_remaining_secs, config.as_model.gamma, config.as_model.kappa);
+            let sigma2 = if s.ewma_variance > 0.0 {
+                s.ewma_variance
+            } else {
+                compute_price_variance(&s.price_history, config.as_model.sigma_window)
+            }
+            .max(1e-18);
+            let q_normalized = normalized_inventory(s.position, mid, config.as_model.risk_unit_usd);
+            let effective_t = match s.vol_regime {
+                crate::types::VolRegime::High => s.t_remaining_secs.min(150.0),
+                crate::types::VolRegime::Extreme => s.t_remaining_secs.min(60.0),
+                _ => s.t_remaining_secs,
+            };
+            let (r, d) = as_quotes(
+                mid,
+                q_normalized,
+                sigma2,
+                effective_t,
+                config.as_model.gamma,
+                config.as_model.kappa,
+            );
             s.reservation_price = r;
             s.as_delta = d.min(config.spread.max_spread_ticks * config.token.tick_size);
         }
@@ -169,6 +284,25 @@ pub fn process_ws_event(config: &Config, state: &Arc<RwLock<MmState>>, evt: WsEv
 
             let fill_side = if is_buy { Side::Buy } else { Side::Sell };
 
+            // Queue time tracking: fill_ts - order_placed_ts
+            if let Some(tracked) = s.order_details.get(&oid) {
+                let queue_time = now - tracked.ts;
+                if queue_time > 0.0 && queue_time < 300.0 {
+                    s.stats.queue_time_sum += queue_time;
+                    s.stats.queue_time_count += 1;
+                }
+            }
+
+            // Spread capture: positive = we sold above mid / bought below mid
+            if let Some(bbo) = s.bbo {
+                let capture = match fill_side {
+                    Side::Buy => bbo.mid - price,   // bought below mid = good
+                    Side::Sell => price - bbo.mid,  // sold above mid = good
+                };
+                s.stats.spread_capture_sum += capture;
+                s.stats.spread_capture_count += 1;
+            }
+
             let mut rt_matched = false;
             for i in 0..s.pending_rts.len() {
                 if s.pending_rts[i].side != fill_side {
@@ -181,6 +315,10 @@ pub fn process_ws_event(config: &Config, state: &Arc<RwLock<MmState>>, evt: WsEv
                     let rt_pnl = (sell_px - buy_px) * size.min(prt.size) - fee.abs();
                     s.stats.rt_count += 1;
                     s.stats.rt_profit += rt_pnl;
+                    s.recent_rt_pnls.push_back(rt_pnl);
+                    while s.recent_rt_pnls.len() > 10 {
+                        s.recent_rt_pnls.pop_front();
+                    }
                     s.pending_rts.remove(i);
                     rt_matched = true;
                     break;
@@ -192,15 +330,29 @@ pub fn process_ws_event(config: &Config, state: &Arc<RwLock<MmState>>, evt: WsEv
                 s.pending_rts.retain(|p| (now - p.time) < 60.0);
             }
 
-            // Record fill for adverse markout tracking
+            // Record fill for adverse markout tracking (multi-horizon)
+            let order_ts = s.order_details.get(&oid).map(|t| t.ts).unwrap_or(now);
             s.fill_history.push_back(crate::types::FillRecord {
                 side: fill_side,
                 fill_price: price,
                 time: now,
                 checked: false,
+                checked_1s: false,
+                checked_5s: false,
+                checked_10s: false,
+                markout_1s: None,
+                markout_5s: None,
+                markout_10s: None,
+                order_ts,
             });
             while s.fill_history.len() > 50 {
                 s.fill_history.pop_front();
+            }
+
+            // Recent fill sides for graduated toxic flow detection (Phase 6)
+            s.recent_fill_sides.push_back((fill_side, now));
+            while s.recent_fill_sides.len() > 20 {
+                s.recent_fill_sides.pop_front();
             }
 
             s.last_fill_time_rt = now;
@@ -244,8 +396,8 @@ pub fn process_ws_event(config: &Config, state: &Arc<RwLock<MmState>>, evt: WsEv
     }
 }
 
-/// Sample fill history for adverse markouts and update markout_score.
-/// Called every iteration. Score is exponentially weighted fraction of adverse fills.
+/// Sample fill history for adverse markouts (multi-horizon) and update markout_score.
+/// Called every iteration.
 fn update_markout_score(state: &mut crate::types::MmState, now: f64, config: &Config) {
     let mid = match state.bbo {
         Some(b) => b.mid,
@@ -253,41 +405,73 @@ fn update_markout_score(state: &mut crate::types::MmState, now: f64, config: &Co
     };
     let tick = config.token.tick_size;
     let threshold = config.risk.markout_threshold_ticks * tick;
-    let sample_delay = config.risk.markout_sample_sec;
     let halflife = config.risk.markout_halflife_sec;
 
-    // Mark fills that are old enough to sample
+    // Sample markouts at multiple horizons
     for fill in state.fill_history.iter_mut() {
-        if fill.checked || (now - fill.time) < sample_delay {
-            continue;
+        let age = now - fill.time;
+
+        // 1s horizon
+        if !fill.checked_1s && age >= 1.0 {
+            fill.checked_1s = true;
+            let chg = match fill.side {
+                crate::types::Side::Buy => mid - fill.fill_price,  // +ve = price rose (good for buy)
+                crate::types::Side::Sell => fill.fill_price - mid, // +ve = price fell (good for sell)
+            };
+            fill.markout_1s = Some(chg);
+            state.stats.markout_1s_sum += chg;
+            state.stats.markout_1s_count += 1;
         }
-        fill.checked = true;
-        // Adverse = price moved against the fill after we got filled
-        let adverse = match fill.side {
-            crate::types::Side::Buy => mid < fill.fill_price - threshold,  // bought, price fell
-            crate::types::Side::Sell => mid > fill.fill_price + threshold, // sold, price rose
-        };
-        if adverse {
-            state.adverse_fill_count += 1;
+
+        // 2s horizon (existing — drives markout_score)
+        if !fill.checked && age >= config.risk.markout_sample_sec {
+            fill.checked = true;
+            let adverse = match fill.side {
+                crate::types::Side::Buy => mid < fill.fill_price - threshold,
+                crate::types::Side::Sell => mid > fill.fill_price + threshold,
+            };
+            if adverse {
+                state.adverse_fill_count += 1;
+            }
+        }
+
+        // 5s horizon
+        if !fill.checked_5s && age >= 5.0 {
+            fill.checked_5s = true;
+            let chg = match fill.side {
+                crate::types::Side::Buy => mid - fill.fill_price,
+                crate::types::Side::Sell => fill.fill_price - mid,
+            };
+            fill.markout_5s = Some(chg);
+            state.stats.markout_5s_sum += chg;
+            state.stats.markout_5s_count += 1;
+        }
+
+        // 10s horizon
+        if !fill.checked_10s && age >= 10.0 {
+            fill.checked_10s = true;
+            let chg = match fill.side {
+                crate::types::Side::Buy => mid - fill.fill_price,
+                crate::types::Side::Sell => fill.fill_price - mid,
+            };
+            fill.markout_10s = Some(chg);
+            state.stats.markout_10s_sum += chg;
+            state.stats.markout_10s_count += 1;
         }
     }
 
-    // Recompute score: exponentially weighted adverse ratio over fill_history
+    // Recompute markout_score: exponentially weighted adverse ratio (uses 2s horizon)
     let mut weighted_adverse = 0.0_f64;
     let mut weight_total = 0.0_f64;
     for fill in state.fill_history.iter() {
-        if !fill.checked {
-            continue;
-        }
+        if !fill.checked { continue; }
         let age = (now - fill.time).max(0.0);
         let w = (-age * std::f64::consts::LN_2 / halflife).exp();
         let adverse = match fill.side {
             crate::types::Side::Buy => mid < fill.fill_price - threshold,
             crate::types::Side::Sell => mid > fill.fill_price + threshold,
         };
-        if adverse {
-            weighted_adverse += w;
-        }
+        if adverse { weighted_adverse += w; }
         weight_total += w;
     }
     state.markout_score = if weight_total > 0.0 {
@@ -498,11 +682,15 @@ pub async fn run_iteration(
         }
     }
 
-    if wait_for_cancel_ack(config, exchange, state, now).await {
-        return;
+    {
+        let mut s = state.write();
+        if s.last_margin_reject_ts > 0.0 && (now - s.last_margin_reject_ts) >= 60.0 && s.size_scale < 1.0 {
+            s.size_scale = (s.size_scale + 0.1).min(1.0);
+            s.last_margin_reject_ts = now;
+        }
     }
 
-    let (bbo, position, risk_action, refresh) = {
+    let (bbo, position, risk_action, refresh, anchor_price, has_bids, has_asks) = {
         let s = state.read();
         let bbo = match s.bbo {
             Some(b) => b,
@@ -510,7 +698,15 @@ pub async fn run_iteration(
         };
         let risk_action = check_risks(config, &s, now);
         let refresh = should_refresh(config, &s, now, &risk_action);
-        (bbo, s.position, risk_action, refresh)
+        (
+            bbo,
+            s.position,
+            risk_action,
+            refresh,
+            s.anchor_price,
+            !s.buy_oids.is_empty(),
+            !s.sell_oids.is_empty(),
+        )
     };
 
     // Use explicit blocks so guards are DEFINITELY dropped before any `.await`
@@ -560,15 +756,6 @@ pub async fn run_iteration(
             s.last_status = format!("STABLE @ ${:.2} | {}t drift", bbo.mid, drift);
             return;
         }
-        RefreshReason::RtWait(remaining) => {
-            let mut s = state.write();
-            let rt_r = s.stats.rt_ratio();
-            s.last_status = format!(
-                "RT WAIT {:.2}s | {}B/{}A | RT:{}({:.0}%)",
-                remaining, s.buy_oids.len(), s.sell_oids.len(), s.stats.rt_count, rt_r * 100.0,
-            );
-            return;
-        }
         RefreshReason::Initial => "Initial",
         RefreshReason::StopExit { sell } => if *sell { "STOP SELL" } else { "STOP BUY" },
         RefreshReason::Replenish => "Replenish",
@@ -595,65 +782,210 @@ pub async fn run_iteration(
         apply_position_limits(config, &s, &mut bid_levels, &mut ask_levels, &refresh, now);
     }
 
-    let cancel_oids: Vec<(String, u64)> = {
-        let s = state.read();
-        s.buy_oids.iter().chain(s.sell_oids.iter())
-            .map(|&oid| (config.token.symbol.clone(), oid))
-            .collect()
-    };
-    if !cancel_oids.is_empty() {
-        let cancel_result = exchange.bulk_cancel(&cancel_oids).await;
-        {
-            let mut s = state.write();
-            match cancel_result {
-                Ok(_) => {
-                    s.cancel_pending_since = Some(now);
-                    s.last_cancel_check_ts = 0.0;
-                    s.last_status = format!("Cancel {} -> {} live", reason_str, cancel_oids.len());
-                }
-                Err(e) => {
-                    let short: String = e.to_string().chars().take(96).collect();
-                    s.last_status = format!("Cancel error: {}", short);
-                }
-            }
-        }
+    // ── Modify-in-place: diff desired levels against existing orders ──────────
+    // Instead of cancel-all + repost, we:
+    //   KEEP  : existing order within keep_ticks of desired price
+    //   MODIFY: existing order drift >= modify_ticks from desired price
+    //   CANCEL: existing order with no matching desired level
+    //   ADD   : desired level with no matching existing order
+    let (manage_bids, manage_asks) = managed_sides(&refresh, bbo, anchor_price, has_bids, has_asks);
+    if !manage_bids && !manage_asks {
+        let mut s = state.write();
+        s.last_status = format!("{} | holding opposite side", reason_str);
         return;
     }
 
-    let mut requests: Vec<OrderRequest> = Vec::with_capacity(bid_levels.len() + ask_levels.len());
-    for lvl in &bid_levels {
-        requests.push(OrderRequest {
-            coin: config.token.symbol.clone(),
-            is_buy: true,
-            sz: lvl.size,
-            limit_px: lvl.price,
-            reduce_only: false,
-            tif: "Alo".to_string(),
-        });
-    }
-    for lvl in &ask_levels {
-        requests.push(OrderRequest {
-            coin: config.token.symbol.clone(),
-            is_buy: false,
-            sz: lvl.size,
-            limit_px: lvl.price,
-            reduce_only: false,
-            tif: "Alo".to_string(),
-        });
+    let keep_ticks = 1u32;
+    let size_keep_eps = 0.05;
+    let tick = config.token.tick_size;
+
+    let all_desired: Vec<(bool, f64, f64)> = bid_levels
+        .iter()
+        .filter(|_| manage_bids)
+        .map(|l| (true, l.price, l.size))
+        .chain(
+            ask_levels
+                .iter()
+                .filter(|_| manage_asks)
+                .map(|l| (false, l.price, l.size)),
+        )
+        .collect();
+
+    let (modify_reqs, cancel_oids_diff, add_reqs, kept_updates) = {
+        let s = state.read();
+        let mut modify_reqs: Vec<crate::exchange::ModifyRequest> = Vec::new();
+        let mut cancel_oids_diff: Vec<(String, u64)> = Vec::new();
+        let mut add_reqs: Vec<OrderRequest> = Vec::new();
+        let mut matched_desired: Vec<bool> = vec![false; all_desired.len()];
+        let mut kept_updates: Vec<(u64, f64, f64, u32)> = Vec::new();
+
+        // For each existing order, find the closest desired level of the same side
+        for &oid in s
+            .buy_oids
+            .iter()
+            .filter(|_| manage_bids)
+            .chain(s.sell_oids.iter().filter(|_| manage_asks))
+        {
+            let tracked = match s.order_details.get(&oid) {
+                Some(t) => t,
+                None => {
+                    cancel_oids_diff.push((config.token.symbol.clone(), oid));
+                    continue;
+                }
+            };
+
+            // Find the closest unmatched desired level on the same side
+            let mut best_match: Option<(usize, f64)> = None;
+            for (di, &(is_buy_d, px_d, _)) in all_desired.iter().enumerate() {
+                if matched_desired[di] { continue; }
+                if is_buy_d != tracked.is_buy { continue; }
+                let dist = (tracked.price - px_d).abs() / tick;
+                if best_match.is_none() || dist < best_match.unwrap().1 {
+                    best_match = Some((di, dist));
+                }
+            }
+
+            match best_match {
+                None => {
+                    // No desired level for this order — cancel it
+                    cancel_oids_diff.push((config.token.symbol.clone(), oid));
+                }
+                Some((di, dist_ticks)) => {
+                    matched_desired[di] = true;
+                    let (_, desired_px, desired_sz) = all_desired[di];
+                    let denom = tracked.size.abs().max(desired_sz.abs()).max(config.token.min_size);
+                    let size_change_ratio = (tracked.size - desired_sz).abs() / denom;
+                    let drift_ticks = dist_ticks.round() as u32;
+                    if dist_ticks <= keep_ticks as f64 && size_change_ratio <= size_keep_eps {
+                        // Price is close enough — keep as-is
+                        kept_updates.push((oid, desired_px, desired_sz, drift_ticks));
+                    } else {
+                        // Modify to new price (resets queue priority but avoids naked period)
+                        modify_reqs.push(crate::exchange::ModifyRequest {
+                            oid,
+                            new_price: desired_px,
+                            new_size: desired_sz,
+                            is_buy: tracked.is_buy,
+                            reduce_only: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Desired levels that had no matching existing order → post new
+        for (di, matched) in matched_desired.iter().enumerate() {
+            if !matched {
+                let (is_buy, px, sz) = all_desired[di];
+                add_reqs.push(OrderRequest {
+                    coin: config.token.symbol.clone(),
+                    is_buy,
+                    sz,
+                    limit_px: px,
+                    reduce_only: false,
+                    tif: "Alo".to_string(),
+                });
+            }
+        }
+
+        (modify_reqs, cancel_oids_diff, add_reqs, kept_updates)
+    };
+
+    // If all desired levels are within keep_ticks and nothing to cancel — true stable
+    if modify_reqs.is_empty() && cancel_oids_diff.is_empty() && add_reqs.is_empty() {
+        let mut s = state.write();
+        for (oid, target_price, target_size, drift_ticks) in &kept_updates {
+            if let Some(tracked) = s.order_details.get_mut(oid) {
+                tracked.target_price = *target_price;
+                tracked.size = *target_size;
+                tracked.drift_ticks = *drift_ticks;
+            }
+        }
+        let drift = s.anchor_price
+            .map(|a| ((bbo.mid - a).abs() / tick) as u32)
+            .unwrap_or(0);
+        s.last_status = format!("STABLE(keep) @ ${:.2} | {}t drift", bbo.mid, drift);
+        return;
     }
 
-    if !requests.is_empty() {
-        let order_result = exchange.bulk_orders(&requests).await;
+    // Execute cancels first (for orders that no longer belong)
+    if !cancel_oids_diff.is_empty() {
+        match exchange.bulk_cancel(&cancel_oids_diff).await {
+            Ok(_) => {
+                let mut s = state.write();
+                for (_, oid) in &cancel_oids_diff {
+                    s.buy_oids.retain(|&o| o != *oid);
+                    s.sell_oids.retain(|&o| o != *oid);
+                    s.order_details.remove(oid);
+                }
+                if !add_reqs.is_empty() {
+                    s.stats.cancel_repost_count += 1;
+                }
+            }
+            Err(e) => {
+                let mut s = state.write();
+                let short: String = e.to_string().chars().take(96).collect();
+                s.last_status = format!("Cancel error: {}", short);
+                return;
+            }
+        }
+    }
+
+    // Execute modifies
+    if !modify_reqs.is_empty() {
+        let mod_result = exchange.bulk_modify(&modify_reqs).await;
+        {
+            let mut s = state.write();
+            match mod_result {
+                Ok(_) => {
+                    // Update tracked prices for modified orders
+                    for m in &modify_reqs {
+                        if let Some(tracked) = s.order_details.get_mut(&m.oid) {
+                            tracked.price = m.new_price;
+                            tracked.size = m.new_size;
+                            tracked.target_price = m.new_price;
+                            tracked.drift_ticks = 0;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let short: String = e.to_string().chars().take(80).collect();
+                    s.last_status = format!("Modify error: {}", short);
+                    // Fall through — add_reqs will still be processed below
+                }
+            }
+        }
+    }
+
+    // Post new orders for unmatched levels
+    if !add_reqs.is_empty() {
+        let order_result = exchange.bulk_orders(&add_reqs).await;
         {
             let mut s = state.write();
             match order_result {
                 Ok(result) => {
                     let (new_buys, new_sells, margin_errs, first_error) =
-                        exchange.parse_bulk_result(&result, &requests);
-                    let details = extract_order_details(&result, &requests, now);
-                    s.buy_oids = new_buys;
-                    s.sell_oids = new_sells;
-                    s.order_details = details;
+                        exchange.parse_bulk_result(&result, &add_reqs);
+                    let new_details = extract_order_details(&result, &add_reqs, now);
+
+                    for (oid, target_price, target_size, drift_ticks) in &kept_updates {
+                        if let Some(tracked) = s.order_details.get_mut(oid) {
+                            tracked.target_price = *target_price;
+                            tracked.size = *target_size;
+                            tracked.drift_ticks = *drift_ticks;
+                        }
+                    }
+                    for oid in new_buys {
+                        if !s.buy_oids.contains(&oid) {
+                            s.buy_oids.push(oid);
+                        }
+                    }
+                    for oid in new_sells {
+                        if !s.sell_oids.contains(&oid) {
+                            s.sell_oids.push(oid);
+                        }
+                    }
+                    for (k, v) in new_details { s.order_details.insert(k, v); }
                     s.cancel_pending_since = None;
 
                     let nb = s.buy_oids.len();
@@ -663,49 +995,61 @@ pub async fn run_iteration(
                         s.size_scale = (s.size_scale * config.margin.reject_decay)
                             .max(config.margin.min_size_scale);
                         s.margin_pause_until = now + config.margin.reject_cooldown;
+                        s.last_margin_reject_ts = now;
                         s.last_status =
                             format!("Margin reject x{} | scale={:.2}", margin_errs, s.size_scale);
                     } else if let Some(ref err) = first_error {
                         let err_short: String = err.chars().take(72).collect();
-                        if nb == 0 && na == 0 {
-                            s.last_status = format!("Order reject: {}", err_short);
-                        } else {
-                            s.last_status = format!(
-                                "{} -> {}B/{}A | partial: {}", reason_str, nb, na, err_short
-                            );
-                        }
-                    } else if nb > 0 || na > 0 {
+                        s.last_status = format!("{} -> {}B/{}A | {}", reason_str, nb, na, err_short);
+                    } else {
                         s.size_scale = (s.size_scale + config.margin.recovery_step).min(1.0);
-                    }
-
-                    s.last_quote_ts = now;
-                    s.anchor_price = Some(bbo.mid);
-                    s.anchor_spread_ticks = Some(
-                        ((bbo.best_ask - bbo.best_bid) / config.token.tick_size) as i32,
-                    );
-                    s.last_sync_time = now;
-
-                    if margin_errs == 0 && first_error.is_none() {
                         s.last_status = format!(
-                            "{} -> {}B/{}A @ ${:.2} S:{}t",
-                            reason_str, nb, na, bbo.mid, s.current_spread_ticks
+                            "{} -> {}B/{}A @ ${:.2} S:{}t (mod:{} add:{})",
+                            reason_str, nb, na, bbo.mid, s.current_spread_ticks,
+                            modify_reqs.len(), add_reqs.len()
                         );
                     }
                 }
                 Err(e) => {
-                    s.buy_oids.clear();
-                    s.sell_oids.clear();
-                    s.order_details.clear();
                     let short: String = e.to_string().chars().take(96).collect();
                     s.last_status = format!("Order error: {}", short);
                 }
             }
+            s.last_quote_ts = now;
+            s.anchor_price = Some(bbo.mid);
+            s.anchor_spread_ticks = Some(
+                ((bbo.best_ask - bbo.best_bid) / tick) as i32,
+            );
+            s.last_sync_time = now;
         }
     } else {
+        // Only modifies, no new orders
         let mut s = state.write();
-        s.buy_oids.clear();
-        s.sell_oids.clear();
-        s.order_details.clear();
-        s.last_status = format!("{} -> 0B/0A (no levels)", reason_str);
+        // Rebuild OID lists: keep kept + modified
+        for (oid, target_price, target_size, drift_ticks) in &kept_updates {
+            if let Some(tracked) = s.order_details.get_mut(oid) {
+                tracked.target_price = *target_price;
+                tracked.size = *target_size;
+                tracked.drift_ticks = *drift_ticks;
+            }
+        }
+        s.cancel_pending_since = None;
+        s.last_quote_ts = now;
+        s.anchor_price = Some(bbo.mid);
+        s.anchor_spread_ticks = Some(((bbo.best_ask - bbo.best_bid) / tick) as i32);
+        s.last_sync_time = now;
+        let nb = s.buy_oids.len();
+        let na = s.sell_oids.len();
+        s.last_status = format!(
+            "{} -> {}B/{}A mod:{} add:{} keep:{} cancel:{}",
+            reason_str,
+            nb,
+            na,
+            modify_reqs.len(),
+            add_reqs.len(),
+            kept_updates.len(),
+            cancel_oids_diff.len()
+        );
+        // Only cancels happened, no desired levels — clear everything
     }
 }
