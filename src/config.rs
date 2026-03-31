@@ -287,7 +287,7 @@ pub fn default_config(token: TokenConfig) -> Config {
         .to_lowercase();
     let risk_unit_usd = token.order_size_usd;
 
-    Config {
+    let mut cfg = Config {
         agent_private_key: std::env::var("HL_AGENT_KEY")
             .unwrap_or_else(|_| String::new()),
         account_address,
@@ -374,5 +374,22 @@ pub fn default_config(token: TokenConfig) -> Config {
             max_loss_usd: 5.0,
             flatten_threshold_usd: 20.0, // flatten if |notional| > $20 at session reset
         },
+    };
+
+    // XYZ100-specific overrides: high volatility (50-100t/min moves) needs tighter A-S params
+    // and a lower spread ceiling to avoid quoting at 20-30t
+    if cfg.token.symbol == "xyz:XYZ100" {
+        // Shorter horizon → term1 (γ·σ²·T/2) stays small even with high σ²
+        cfg.as_model.t_secs = 90.0;
+        // Higher arrival rate — XYZ100 is very liquid
+        cfg.as_model.kappa = 3.0;
+        // Lower risk aversion so σ² spikes don't blow out the spread
+        cfg.as_model.gamma = 0.0005;
+        // Tighter spread ceiling: 8t max on a $1-tick instrument at ~24000
+        cfg.spread.max_spread_ticks = 8.0;
+        // Smaller sigma window → faster response to vol changes
+        cfg.as_model.sigma_window = 32;
     }
+
+    cfg
 }
