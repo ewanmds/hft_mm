@@ -385,8 +385,10 @@ pub fn default_config(token: TokenConfig) -> Config {
         cfg.as_model.kappa = 3.0;
         // Lower risk aversion so σ² spikes don't blow out the spread
         cfg.as_model.gamma = 0.0005;
-        // Tighter spread ceiling: 8t max on a $1-tick instrument at ~24000
-        cfg.spread.max_spread_ticks = 8.0;
+        // Tighter spread ceiling: 3t half-spread = 6t total displayed
+        cfg.spread.max_spread_ticks = 3.0;
+        cfg.spread.min_spread_ticks = 2.0;
+        cfg.spread.base_spread_ticks = 2.0;
         // Smaller sigma window → faster response to vol changes
         cfg.as_model.sigma_window = 32;
     }
